@@ -23,10 +23,12 @@ _DETAIL_CSS = """
 """
 
 from app.crud import (
+    delete_language,
     delete_snippet,
     duplicate_snippet,
     get_all_languages,
     get_all_tags,
+    get_language_snippet_counts,
     get_snippet,
     get_snippets,
     toggle_pin,
@@ -94,6 +96,7 @@ def create_layout() -> None:
         session = get_session()
         try:
             languages = get_all_languages(session)
+            lang_counts = get_language_snippet_counts(session)
             tags = get_all_tags(session)
         finally:
             session.close()
@@ -126,11 +129,21 @@ def create_layout() -> None:
             with ui.column().classes("w-full gap-0 px-1"):
                 _filter_item("すべて", s.language_id is None, lambda: _on_lang(None))
                 for lang in languages:
-                    _filter_item(
-                        lang.name,
-                        s.language_id == lang.id,
-                        lambda lid=lang.id: _on_lang(lid),
-                    )
+                    unused = lang_counts.get(lang.id, 0) == 0
+                    with ui.row().classes("w-full items-center gap-0"):
+                        # 言語フィルターボタン（残り全幅を占有）
+                        ui.button(
+                            lang.name,
+                            on_click=lambda lid=lang.id: _on_lang(lid),
+                        ).classes("flex-1 justify-start text-sm").props(
+                            f"flat no-caps color={'primary' if s.language_id == lang.id else 'grey-8'}"
+                        )
+                        # 未使用言語のみゴミ箱ボタンを表示する
+                        if unused:
+                            ui.button(
+                                icon="delete_outline",
+                                on_click=lambda lid=lang.id: _delete_language(lid),
+                            ).props("flat dense round color=grey-5 size=xs")
 
         # ── タグセクション（ヘッダークリックで折りたたみ / AND・OR 切替）──
         with ui.row().classes("items-center px-3 pt-4 pb-1 gap-1"):
@@ -319,6 +332,24 @@ def create_layout() -> None:
         snippet_list.refresh()
         snippet_detail.refresh()
 
+    def _delete_language(lang_id: int) -> None:
+        """ゴミ箱ボタンが押されたときに未使用言語を削除する"""
+        db = get_session()
+        try:
+            ok = delete_language(db, lang_id)
+        finally:
+            db.close()
+        if ok:
+            # 削除した言語が選択中だった場合はフィルターをリセットする
+            if s.language_id == lang_id:
+                s.language_id = None
+                snippet_list.refresh()
+                snippet_detail.refresh()
+            filter_panel.refresh()
+            ui.notify("言語を削除しました", type="positive", position="top-right")
+        else:
+            ui.notify("この言語は使用中のため削除できません", type="warning", position="top-right")
+
     def _on_toggle_lang() -> None:
         """言語セクションヘッダーがクリックされたときに折りたたみをトグルする"""
         s.lang_collapsed = not s.lang_collapsed
@@ -424,7 +455,7 @@ def create_layout() -> None:
             )
             # 検索バー：入力のたびにリアルタイムでスニペット一覧を更新する
             ui.input(
-                placeholder="検索（タイトル・コード・タグ）",
+                placeholder="検索（タイトル・説明・コード・言語・タグ　スペースでAND）",
                 on_change=lambda e: [
                     setattr(s, "search", e.value),
                     snippet_list.refresh(),

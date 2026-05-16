@@ -13,6 +13,31 @@ def get_all_languages(session: Session) -> list[Language]:
     return session.query(Language).order_by(Language.name).all()
 
 
+def get_language_snippet_counts(session: Session) -> dict[int, int]:
+    """言語IDごとのスニペット数を返す（削除ボタンの表示判定に使用）"""
+    from sqlalchemy import func
+    rows = (
+        session.query(Language.id, func.count(Snippet.id))
+        .outerjoin(Snippet, Snippet.language_id == Language.id)
+        .group_by(Language.id)
+        .all()
+    )
+    return {lang_id: count for lang_id, count in rows}
+
+
+def delete_language(session: Session, language_id: int) -> bool:
+    """スニペットに使われていない言語を削除する。使われている場合は False を返す"""
+    count = session.query(Snippet).filter(Snippet.language_id == language_id).count()
+    if count > 0:
+        return False
+    lang = session.query(Language).filter(Language.id == language_id).first()
+    if not lang:
+        return False
+    session.delete(lang)
+    session.commit()
+    return True
+
+
 def get_or_create_language(session: Session, name: str) -> Language:
     """言語名で検索し、存在しなければ新規作成して返す"""
     name = name.strip()
@@ -75,17 +100,20 @@ def get_snippets(
         else:
             q = q.filter(Snippet.tags.any(Tag.id.in_(tag_ids)))
 
-    # キーワード検索（タイトル・説明・コード・タグ名を対象に部分一致）
+    # キーワード検索（スペース区切りで複数ワードの AND 検索）
+    # 各ワードがタイトル・説明・コード・タグ名・言語名のいずれかに部分一致すればヒット
     if search:
-        like = f"%{search}%"
-        q = q.filter(
-            or_(
-                Snippet.title.ilike(like),
-                Snippet.description.ilike(like),
-                Snippet.code.ilike(like),
-                Snippet.tags.any(Tag.name.ilike(like)),
+        for word in search.split():
+            like = f"%{word}%"
+            q = q.filter(
+                or_(
+                    Snippet.title.ilike(like),
+                    Snippet.description.ilike(like),
+                    Snippet.code.ilike(like),
+                    Snippet.tags.any(Tag.name.ilike(like)),
+                    Snippet.language.has(Language.name.ilike(like)),
+                )
             )
-        )
 
     # ピン留めを先頭に固定し、その中で選択されたソート順を適用する
     order = _SORT_COLUMNS.get(sort_by, Snippet.updated_at.desc())
