@@ -1,33 +1,49 @@
+# データベース接続・初期化・マイグレーション処理
+
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
+# DB ファイルの保存先（プロジェクトルートの data/ フォルダ）
 DATA_DIR = Path(__file__).parent.parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)  # フォルダが存在しない場合は自動作成
 
 DATABASE_URL = f"sqlite:///{DATA_DIR}/snippets.db"
+
+# SQLite はスレッドをまたぐ接続を禁止しているが、NiceGUI の非同期処理で
+# 複数スレッドから触るため check_same_thread=False で制限を解除する
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+# DB セッションのファクトリ（呼び出すたびに新しいセッションを生成する）
 SessionLocal = sessionmaker(bind=engine)
 
 
 class Base(DeclarativeBase):
+    """全モデルの基底クラス。モデルはこのクラスを継承して定義する"""
     pass
 
 
 def get_session():
+    """新しい DB セッションを返す。使用後は呼び出し元で close() すること"""
     return SessionLocal()
 
 
 def init_db() -> None:
-    from app import models  # noqa: F401
+    """アプリ起動時に呼び出す DB 初期化処理"""
+    from app import models  # noqa: F401 — モデルをインポートして Base に登録する
 
+    # 存在しないテーブルを作成する（既存テーブルは変更しない）
     Base.metadata.create_all(bind=engine)
+    # 既存 DB へのカラム追加など、後から加えた変更を反映する
     _migrate()
+    # 初回起動時のみサンプルデータを投入する
     _seed_initial_data()
 
 
 def _migrate() -> None:
+    """既存 DB に新しいカラムを追加するマイグレーション処理。
+    既にカラムが存在する場合は例外を無視してスキップする。"""
     with engine.connect() as conn:
         try:
             conn.execute(
@@ -37,25 +53,30 @@ def _migrate() -> None:
             )
             conn.commit()
         except Exception:
+            # カラムが既に存在する場合のエラーは正常なのでスキップ
             pass
 
 
 def _seed_initial_data() -> None:
+    """初回起動時のみサンプルデータ（言語・スニペット・タグ）を投入する"""
     from app.models import Language, Snippet, Tag
 
     session = SessionLocal()
     try:
+        # 言語レコードが1件でもあれば投入済みとみなして終了する
         if session.query(Language).count() > 0:
             return
 
+        # 初期言語マスタを登録し、名前→オブジェクトのマップを作成する
         lang_names = ["SQL", "C#", "VBA", "Python", "JavaScript", "PowerShell", "その他"]
         lang_map: dict[str, Language] = {}
         for name in lang_names:
             lang = Language(name=name)
             session.add(lang)
             lang_map[name] = lang
-        session.flush()
+        session.flush()  # ID を確定させてからスニペット登録に進む
 
+        # サンプルスニペットの定義
         samples = [
             {
                 "title": "顧客一覧取得",
@@ -113,6 +134,8 @@ def _seed_initial_data() -> None:
             },
         ]
 
+        # サンプルスニペットとタグを登録する
+        # 同じタグ名を重複登録しないようにキャッシュを使う
         tag_cache: dict[str, Tag] = {}
         for s in samples:
             snippet = Snippet(
@@ -122,7 +145,7 @@ def _seed_initial_data() -> None:
                 language=lang_map[s["language"]],
             )
             session.add(snippet)
-            session.flush()
+            session.flush()  # スニペット ID を確定させてからタグを紐付ける
             for tag_name in s["tags"]:
                 if tag_name not in tag_cache:
                     tag = Tag(name=tag_name)

@@ -8,13 +8,13 @@
 1. PowerShell（またはコマンドプロンプト）を開く
 
 2. プロジェクトフォルダに移動する
-   cd C:\Users\user_yk\workspace\dev-code-knowledge
+   cd C:\path\to\dev-code-knowledge
 
 3. 仮想環境を有効化する
    .venv\Scripts\activate
 
    → プロンプトの先頭に (.venv) が表示されれば成功
-   例: (.venv) PS C:\Users\user_yk\workspace\dev-code-knowledge>
+   例: (.venv) PS C:\path\to\dev-code-knowledge>
 
 4. アプリを起動する
    python main.py

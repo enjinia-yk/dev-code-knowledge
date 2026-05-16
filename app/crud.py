@@ -1,3 +1,5 @@
+# スニペット・言語・タグの CRUD 操作（Create / Read / Update / Delete）
+
 from datetime import datetime
 
 from sqlalchemy import or_
@@ -7,23 +9,27 @@ from app.models import Language, Snippet, Tag
 
 
 def get_all_languages(session: Session) -> list[Language]:
+    """全言語を名前順で取得する"""
     return session.query(Language).order_by(Language.name).all()
 
 
 def get_or_create_language(session: Session, name: str) -> Language:
+    """言語名で検索し、存在しなければ新規作成して返す"""
     name = name.strip()
     lang = session.query(Language).filter(Language.name == name).first()
     if not lang:
         lang = Language(name=name)
         session.add(lang)
-        session.flush()
+        session.flush()  # ID を確定させる
     return lang
 
 
 def get_all_tags(session: Session) -> list[Tag]:
+    """全タグを名前順で取得する"""
     return session.query(Tag).order_by(Tag.name).all()
 
 
+# ソート条件の定義（キー → SQLAlchemy の ORDER BY 句）
 _SORT_COLUMNS = {
     "updated_desc": Snippet.updated_at.desc(),
     "updated_asc":  Snippet.updated_at.asc(),
@@ -43,20 +49,33 @@ def get_snippets(
     sort_by: str = "updated_desc",
     pinned_only: bool = False,
 ) -> list[Snippet]:
+    """条件に合うスニペット一覧を取得する。
+    ピン留めスニペットは常に先頭にまとめて表示する。"""
+
+    # 言語・タグを1回のクエリで取得する（N+1問題を防ぐ）
     q = session.query(Snippet).options(
         joinedload(Snippet.language),
         joinedload(Snippet.tags),
     )
+
+    # ピン留めのみ表示フィルター
     if pinned_only:
         q = q.filter(Snippet.is_pinned.is_(True))
+
+    # 言語フィルター
     if language_id is not None:
         q = q.filter(Snippet.language_id == language_id)
+
+    # タグフィルター（AND: 全タグを持つ / OR: いずれかのタグを持つ）
     if tag_ids:
         if tag_mode == "and":
+            # 各タグ条件を連鎖させることで AND 絞り込みを実現する
             for tid in tag_ids:
                 q = q.filter(Snippet.tags.any(Tag.id == tid))
         else:
             q = q.filter(Snippet.tags.any(Tag.id.in_(tag_ids)))
+
+    # キーワード検索（タイトル・説明・コード・タグ名を対象に部分一致）
     if search:
         like = f"%{search}%"
         q = q.filter(
@@ -67,11 +86,14 @@ def get_snippets(
                 Snippet.tags.any(Tag.name.ilike(like)),
             )
         )
+
+    # ピン留めを先頭に固定し、その中で選択されたソート順を適用する
     order = _SORT_COLUMNS.get(sort_by, Snippet.updated_at.desc())
     return q.order_by(Snippet.is_pinned.desc(), order).all()
 
 
 def get_snippet(session: Session, snippet_id: int) -> Snippet | None:
+    """ID を指定してスニペット1件を取得する"""
     return (
         session.query(Snippet)
         .options(joinedload(Snippet.language), joinedload(Snippet.tags))
@@ -88,11 +110,12 @@ def create_snippet(
     description: str = "",
     tags: list[str] | None = None,
 ) -> Snippet:
+    """新しいスニペットを登録して返す"""
     snippet = Snippet(
         title=title, code=code, language_id=language_id, description=description
     )
     session.add(snippet)
-    session.flush()
+    session.flush()  # ID を確定させてからタグを紐付ける
     _sync_tags(session, snippet, tags or [])
     session.commit()
     session.refresh(snippet)
@@ -108,6 +131,7 @@ def update_snippet(
     description: str = "",
     tags: list[str] | None = None,
 ) -> Snippet | None:
+    """既存スニペットを更新して返す。対象が存在しない場合は None を返す"""
     snippet = (
         session.query(Snippet)
         .options(joinedload(Snippet.tags))
@@ -120,6 +144,7 @@ def update_snippet(
     snippet.code = code
     snippet.language_id = language_id
     snippet.description = description
+    # onupdate では手動更新が反映されないケースがあるため明示的に設定する
     snippet.updated_at = datetime.now()
     _sync_tags(session, snippet, tags or [])
     session.commit()
@@ -128,6 +153,7 @@ def update_snippet(
 
 
 def toggle_pin(session: Session, snippet_id: int) -> Snippet | None:
+    """スニペットのピン留め状態を ON/OFF 切り替えて返す"""
     snippet = session.query(Snippet).filter(Snippet.id == snippet_id).first()
     if not snippet:
         return None
@@ -138,6 +164,8 @@ def toggle_pin(session: Session, snippet_id: int) -> Snippet | None:
 
 
 def duplicate_snippet(session: Session, snippet_id: int) -> Snippet | None:
+    """スニペットを複製して新しいスニペットとして返す。
+    ピン留め状態は引き継がない。"""
     original = (
         session.query(Snippet)
         .options(joinedload(Snippet.tags))
@@ -151,6 +179,7 @@ def duplicate_snippet(session: Session, snippet_id: int) -> Snippet | None:
         code=original.code,
         description=original.description,
         language_id=original.language_id,
+        # is_pinned はデフォルト値（False）のまま引き継がない
     )
     session.add(copy)
     session.flush()
@@ -161,31 +190,39 @@ def duplicate_snippet(session: Session, snippet_id: int) -> Snippet | None:
 
 
 def delete_snippet(session: Session, snippet_id: int) -> None:
+    """スニペットを削除し、不要になったタグも合わせて削除する"""
     snippet = session.query(Snippet).filter(Snippet.id == snippet_id).first()
     if snippet:
         session.delete(snippet)
-        session.flush()
+        session.flush()  # 削除を確定してから孤立タグを検出する
         _cleanup_unused_tags(session)
         session.commit()
 
 
 def _sync_tags(session: Session, snippet: Snippet, tag_names: list[str]) -> None:
+    """スニペットに紐づくタグを tag_names の内容に同期する。
+    一度全て外してから付け直すことで追加・削除を一括処理する。"""
     snippet.tags.clear()
     session.flush()
     for raw in tag_names:
         name = raw.strip()
         if not name:
             continue
+        # 既存タグを再利用し、なければ新規作成する
         tag = session.query(Tag).filter(Tag.name == name).first()
         if not tag:
             tag = Tag(name=name)
             session.add(tag)
             session.flush()
         snippet.tags.append(tag)
+    # タグ同期後に使われなくなったタグを削除する
     _cleanup_unused_tags(session)
 
 
 def _cleanup_unused_tags(session: Session) -> None:
+    """どのスニペットにも紐づいていない孤立タグを一括削除する"""
     from app.models import SnippetTag
+    # 現在使われているタグ ID のセットを取得する
     used_ids = {row.tag_id for row in session.query(SnippetTag.tag_id).all()}
+    # 使われていないタグをまとめて削除する
     session.query(Tag).filter(Tag.id.notin_(used_ids)).delete(synchronize_session="fetch")
